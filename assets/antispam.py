@@ -1,0 +1,182 @@
+import inspect
+
+from aiogram import types
+from functools import wraps
+import time
+
+from aiogram.types import ChatMemberOwner, ChatMemberAdministrator
+
+import config as cfg
+import commands.db as db
+from bot import bot
+
+from user import BFGuser
+from assets.classes import FunEvent
+
+
+earning_msg = {}
+
+
+def admin_only(private=False):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(message: types.Message, *args, **kwargs):
+            if message.from_user.id not in cfg.admin:
+                return
+            
+            if private and message.chat.type != "private":
+                return
+            
+            return await func(message, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def antispam(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        message = None
+
+        for arg in args:
+            if isinstance(arg, types.Message):
+                message = arg
+                break
+        if not message and 'message' in kwargs:
+            message = kwargs['message']
+
+        if not message:
+            raise ValueError("antispam: argument not found message: types.Message")
+
+        if message.forward_from:
+            return
+
+        if message.chat.type == "supergroup":
+            await db.upd_chat_db(message.chat.id)
+
+        uid = message.from_user.id
+
+        ban = await check_ban(uid)
+        if ban:
+            return
+
+        sig = inspect.signature(func)
+        if "user" in sig.parameters and "user" not in kwargs:
+            user = BFGuser(message=message)
+            await user.update()
+            kwargs["user"] = user
+
+        await FunEvent.emit(func.__name__, message, kwargs.get("user"), "message")
+
+        return await func(*args, **kwargs)
+
+    return wrapper
+
+
+def antispam_earning(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        call = None
+
+        for arg in args:
+            if isinstance(arg, types.CallbackQuery):
+                call = arg
+                break
+        if not call and 'call' in kwargs:
+            call = kwargs['call']
+
+        if not call:
+            raise ValueError("antispam_earning: argument not found call: CallbackQuery")
+
+        uid = int(call.from_user.id)
+        mid = call.data.split("|")
+        mid = mid[1] if len(mid) > 1 else None
+
+        if mid and uid != int(mid):
+            await bot.answer_callback_query(call.id, text="❌ Это не Ваша кнопка!")
+            return
+
+        ban = await check_ban(uid)
+        if ban:
+            return
+
+        chat = call.message.chat.id
+        msg = call.message.message_id
+
+        data = earning_msg.get((chat, msg))
+        if data:
+            if data[0] < 50:
+                if int(time.time() - 750) < int(data[1]):
+                    if (time.time() - data[1]) < 1:
+                        await bot.answer_callback_query(call.id, text="⏳ Не так быстро! (1 сек)")
+                        return
+
+                    earning_msg[(chat, msg)] = (data[0] + 1, int(time.time()))
+
+                    sig = inspect.signature(func)
+                    if "user" in sig.parameters and "user" not in kwargs:
+                        user = BFGuser(call=call)
+                        await user.update()
+                        kwargs["user"] = user
+
+                    return await func(*args, **kwargs)
+
+        try:
+            await bot.delete_message(chat_id=chat, message_id=msg)
+        except:
+            pass
+        earning_msg.pop((chat, msg), None)
+
+    return wrapper
+
+
+def moderation(func):
+    async def wrapper(message: types.Message, user: BFGuser):
+        if message.forward_from:
+            return
+
+        if message.chat.type != "supergroup":
+            await message.answer("👇 <b>Эту команду можно использовать только в чатах.</b>")
+            return
+
+        member = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
+
+        if member.status not in ["creator", "administrator"]:
+            await message.reply(f"😨 <b>Эту команду могут использовать только администраторы чата.</b>")
+            return
+
+        bot_info = await message.chat.get_member(user_id=message.bot.id)
+        text = ""
+
+        if not isinstance(bot_info, (ChatMemberOwner, ChatMemberAdministrator)):
+            await message.reply("⚠️ <b>Боту необходимы права администратора в чате.</b>")
+            return
+
+        if not bot_info.can_delete_messages:
+            text += "- 🗑️ Удаление сообщений\n"
+        if not bot_info.can_restrict_members:
+            text += "- 📛 Блокировка пользователей\n"
+            
+        if text:
+            await message.reply(f"⚠️ <b>Боту необходимы права администратора в чате:</b>\n\n{text}")
+            return
+
+        await func(message, user)
+
+    return wrapper
+
+
+async def check_ban(user_id: int) -> bool:
+    await db.reg_user(user_id=user_id)
+    ban_time = await db.getban(user_id=user_id)
+
+    if ban_time and time.time() < ban_time[1]:
+        return True
+    return False
+
+
+async def new_earning_msg(chat_id: int, message_id: int) -> None:
+    earning_msg[chat_id, message_id] = (0, time.time()-2)
+    
+    
+async def new_earning(msg: types.Message) -> None:
+    earning_msg[msg.chat.id, msg.message_id] = (0, time.time()-2)

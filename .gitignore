@@ -1,0 +1,11 @@
+config.py
+*.db
+users.db
+.encryption_key
+bots_db.json
+users_db.json
+settings.json
+__pycache__/
+*.pyc
+.venv/
+venv/
